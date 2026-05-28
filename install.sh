@@ -45,8 +45,7 @@ cat << 'EOF' > run.sh
 #!/bin/bash
 # Startet den Downloader in der virtuellen Umgebung
 SOURCE_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
-source "$SOURCE_DIR/venv/bin/activate"
-python "$SOURCE_DIR/download_video.py" "$@"
+"$SOURCE_DIR/venv/bin/python" "$SOURCE_DIR/download_video.py" "$@"
 EOF
 
 chmod +x run.sh
