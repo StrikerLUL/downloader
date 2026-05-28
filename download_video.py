@@ -14,6 +14,68 @@ class VoeDownloader:
         # Erstellt einen Scraper, der wie ein echter Browser agiert
         self.scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False})
         self.mirrors = ["rebeccasciencestreet.com", "nicholasbreakplan.com", "voe.sx", "ceremonioustakeintoaccountcustomer.com"]
+        self.logged_in = False
+
+    def load_and_login(self, base_url=None):
+        if self.logged_in:
+            return True
+            
+        import json
+        account_file = "account.json"
+        
+        if os.path.exists(account_file):
+            try:
+                with open(account_file, "r") as f:
+                    data = json.load(f)
+                email = data.get("email")
+                password = data.get("password")
+                if email and password:
+                    login_base = base_url if base_url else "http://186.2.175.5"
+                    self.logged_in = self.login(email, password, login_base)
+                    return self.logged_in
+            except Exception as e:
+                print(f"[!] Fehler beim Laden von account.json: {e}")
+        return False
+
+    def login(self, email, password, base_url):
+        print(f"[*] Versuche automatischen Login für {email} auf {base_url}...")
+        try:
+            from urllib.parse import urljoin
+            login_url = urljoin(base_url, "/login")
+            
+            # 1. CSRF Token holen
+            res = self.scraper.get(login_url, timeout=15)
+            soup = BeautifulSoup(res.text, "html.parser")
+            token_input = soup.find("input", {"name": "_token"})
+            if not token_input:
+                print("[!] Login-Fehler: Kein CSRF-Token auf der Seite gefunden.")
+                return False
+                
+            csrf_token = token_input.get("value")
+            
+            # 2. Login absenden
+            payload = {
+                "_token": csrf_token,
+                "email": email,
+                "password": password
+            }
+            
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Referer": login_url
+            }
+            
+            post_res = self.scraper.post(login_url, data=payload, headers=headers, timeout=15)
+            
+            if "login" not in post_res.url.lower():
+                print("[+] Login erfolgreich! Captcha-Bypass ist jetzt aktiv.")
+                return True
+            else:
+                print("[!] Login fehlgeschlagen: Ungültige Zugangsdaten.")
+                return False
+        except Exception as e:
+            print(f"[!] Login-Fehler: {e}")
+        return False
 
     def rot13(self, text):
         res = []
@@ -65,11 +127,11 @@ class VoeDownloader:
         except Exception as e:
             return f"FAILED step 7: {e}"
 
-    def fetch_page(self, url):
+    def fetch_page(self, url, referer=None):
         print(f"[*] Lade Seite: {url}")
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer": url
+            "Referer": referer if referer else url
         }
         res = self.scraper.get(url, headers=headers, timeout=15)
         print(f"[*] Status: {res.status_code} | Finale URL: {res.url} | Länge: {len(res.text)} Bytes")
@@ -253,6 +315,7 @@ class VoeDownloader:
         try:
             # 0. Falls es eine Serien-Hub-URL ist, den Hoster-Link extrahieren
             is_series_hub = "aniworld.to" in url or "s.to" in url or "serienstream.to" in url or "/serie/" in url or "/stream/" in url
+            original_url = url
             if is_series_hub:
                 print(f"[*] Serien-Hub-URL erkannt: {url}")
                 html, final_url = self.fetch_page(url)
@@ -264,7 +327,35 @@ class VoeDownloader:
                     return None
 
             # 1. Hauptseite laden (inklusive Weiterleitungs-Handling)
-            html, final_url = self.fetch_page(url)
+            html, final_url = self.fetch_page(url, referer=original_url if is_series_hub else None)
+            
+            # Falls wir die Captcha-Bridge geladen haben, versuchen wir den automatischen Login
+            if "frameBridge" in html:
+                print("\n[!] Captcha-Blockade erkannt (Datacenter-IP).")
+                from urllib.parse import urlparse
+                parsed = urlparse(final_url)
+                base_url = f"{parsed.scheme}://{parsed.netloc}"
+                
+                # Wenn wir account.json haben, loggen wir uns ein
+                if not self.logged_in and os.path.exists("account.json"):
+                    print("[*] Lade gespeicherte Zugangsdaten aus account.json...")
+                    self.load_and_login(base_url)
+                
+                # Wenn wir immer noch nicht eingeloggt sind, fragen wir nach den Zugangsdaten
+                if not self.logged_in:
+                    print("[*] Um den Schutz vollautomatisch zu umgehen, erstelle dir ein kostenloses Konto auf SerienStream/s.to.")
+                    print("[*] Gib deine Anmeldedaten ein (werden lokal in account.json gespeichert):")
+                    email = input("E-Mail: ").strip()
+                    password = input("Passwort: ").strip()
+                    if email and password:
+                        import json
+                        with open("account.json", "w") as f:
+                            json.dump({"email": email, "password": password}, f)
+                        self.load_and_login(base_url)
+                
+                if self.logged_in:
+                    print("[*] Lade Seite nach erfolgreichem Login erneut...")
+                    html, final_url = self.fetch_page(url, referer=original_url if is_series_hub else None)
             
             # 2. Versuch der direkten Dekodierung über Methode 7 (Sehr robust!)
             direct_link = self.decrypt_page_source(html)

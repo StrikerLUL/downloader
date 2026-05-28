@@ -13,3 +13,6 @@ __pycache__/
 # Virtual Environments
 venv/
 .venv/
+
+# Private credentials
+account.json
