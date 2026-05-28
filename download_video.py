@@ -291,7 +291,10 @@ class VoeDownloader:
 
             if not video_id:
                 print("[!] Fehler: Video-ID konnte nicht im Quelltext gefunden werden.")
-                print(f"[*] Quelltext-Vorschau (erste 400 Zeichen): {repr(html[:400])}")
+                if len(html) < 2000:
+                    print(f"[*] Kompletter Quelltext der Seite:\n{html}")
+                else:
+                    print(f"[*] Quelltext-Vorschau (erste 400 Zeichen): {repr(html[:400])}")
                 title_match = re.search(r"<title>([^<]+)</title>", html, re.IGNORECASE)
                 if title_match:
                     print(f"[*] HTML Titel der Seite: '{title_match.group(1).strip()}'")
