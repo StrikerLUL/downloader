@@ -72,6 +72,14 @@ class VoeDownloader:
             "Referer": url
         }
         res = self.scraper.get(url, headers=headers, timeout=15)
+        print(f"[*] Status: {res.status_code} | Finale URL: {res.url} | Länge: {len(res.text)} Bytes")
+        
+        # Cloudflare oder Blockierungserkennung
+        if "cloudflare" in res.text.lower() or "just a moment" in res.text.lower():
+            print("[!] Warnung: Cloudflare-Schutz auf dieser Seite erkannt!")
+        elif res.status_code == 403:
+            print("[!] Warnung: Zugriff verweigert (403 Forbidden). Möglicherweise wird die IP-Adresse blockiert.")
+            
         # Keine JS-Weiterleitungen folgen für Serien-Hub-Seiten, da diese Seiten keine Player-Redirects haben
         is_series_hub = "aniworld.to" in res.url or "s.to" in res.url or "serienstream.to" in res.url or "/serie/" in res.url or "/stream/" in res.url
         if is_series_hub:
@@ -91,6 +99,7 @@ class VoeDownloader:
                     print(f"[*] JS-Weiterleitung erkannt: {next_url}")
                     headers["Referer"] = res.url
                     res = self.scraper.get(next_url, headers=headers, timeout=15)
+                    print(f"[*] Status (JS): {res.status_code} | URL: {res.url} | Länge: {len(res.text)} Bytes")
                 else:
                     break
             else:
@@ -282,6 +291,10 @@ class VoeDownloader:
 
             if not video_id:
                 print("[!] Fehler: Video-ID konnte nicht im Quelltext gefunden werden.")
+                print(f"[*] Quelltext-Vorschau (erste 400 Zeichen): {repr(html[:400])}")
+                title_match = re.search(r"<title>([^<]+)</title>", html, re.IGNORECASE)
+                if title_match:
+                    print(f"[*] HTML Titel der Seite: '{title_match.group(1).strip()}'")
                 return None
             
             print(f"[*] Video-ID erkannt: {video_id}")
