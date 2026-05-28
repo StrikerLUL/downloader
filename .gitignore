@@ -1,0 +1,15 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Video downloads
+*.mp4
+*.mkv
+
+# Temporary files
+*.html
+*.log
+
+# Virtual Environments
+venv/
+.venv/
