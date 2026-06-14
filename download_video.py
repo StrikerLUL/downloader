@@ -10,15 +10,23 @@ import cloudscraper
 import base64
 
 class VoeDownloader:
-    def __init__(self):
+    def __init__(self, preferred_lang="german"):
         # Erstellt einen Scraper, der wie ein echter Browser agiert
         self.scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False})
         self.mirrors = ["rebeccasciencestreet.com", "nicholasbreakplan.com", "voe.sx", "ceremonioustakeintoaccountcustomer.com"]
         self.logged_in = False
+        self.preferred_lang = preferred_lang
 
-    def load_and_login(self, base_url=None):
+    def load_and_login(self, email=None, password=None, base_url=None):
         if self.logged_in:
             return True
+            
+        login_base = base_url if base_url else "http://186.2.175.5"
+        
+        # Falls Zugangsdaten direkt übergeben wurden
+        if email and password:
+            self.logged_in = self.login(email, password, login_base)
+            return self.logged_in
             
         import json
         account_file = "account.json"
@@ -27,11 +35,10 @@ class VoeDownloader:
             try:
                 with open(account_file, "r") as f:
                     data = json.load(f)
-                email = data.get("email")
-                password = data.get("password")
-                if email and password:
-                    login_base = base_url if base_url else "http://186.2.175.5"
-                    self.logged_in = self.login(email, password, login_base)
+                email_json = data.get("email")
+                password_json = data.get("password")
+                if email_json and password_json:
+                    self.logged_in = self.login(email_json, password_json, login_base)
                     return self.logged_in
             except Exception as e:
                 print(f"[!] Fehler beim Laden von account.json: {e}")
@@ -127,6 +134,60 @@ class VoeDownloader:
         except Exception as e:
             return f"FAILED step 7: {e}"
 
+    def extract_xor_key(self, html):
+        patterns = [
+            r'window\.c\s*=\s*[\'"]([a-f0-9]+)[\'"]',
+            r'const\s+key\s*=\s*[\'"]([a-f0-9]+)[\'"]',
+            r'var\s+key\s*=\s*[\'"]([a-f0-9]+)[\'"]',
+            r'[\'"]key[\'"]\s*:\s*[\'"]([a-f0-9]+)[\'"]',
+            r'window\.c\s*=\s*([a-f0-9]+)\b'
+        ]
+        for p in patterns:
+            m = re.search(p, html)
+            if m:
+                return m.group(1)
+        return None
+
+    def voe_decrypt_xor(self, scrambled, key):
+        scrambled = scrambled[::-1]
+        mapping = {'!': '0', '@': '1', '#': '2', '&': '3', '%': '4', '?': '5', '~': '6', '*': '7', '^': '8', '$': '9'}
+        for k, v in mapping.items():
+            scrambled = scrambled.replace(k, v)
+        std_b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+        voe_b64 = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/"
+        trans = str.maketrans(voe_b64, std_b64)
+        translated = scrambled.translate(trans)
+        try:
+            decoded_bytes = base64.b64decode(translated + "===")
+            res = ""
+            for i, b in enumerate(decoded_bytes):
+                res += chr(b ^ ord(key[i % len(key)]))
+            return res
+        except Exception as e:
+            return f"FAILED: {e}"
+
+    def parse_series_info(self, url):
+        patterns = [
+            r'/anime/stream/([^/]+)/staffel-([^/]+)/episode-([^/&#?]+)',
+            r'/(?:serie|stream)/([^/]+)/staffel-([^/]+)/episode-([^/&#?]+)'
+        ]
+        for p in patterns:
+            m = re.search(p, url)
+            if m:
+                series_name = m.group(1).replace('-', ' ').title()
+                try:
+                    season_num = int(m.group(2))
+                    season_str = f"S{season_num:02d}"
+                except ValueError:
+                    season_str = f"S_{m.group(2)}"
+                try:
+                    episode_num = int(m.group(3))
+                    episode_str = f"E{episode_num:02d}"
+                except ValueError:
+                    episode_str = f"E_{m.group(3)}"
+                return f"{series_name} - {season_str}{episode_str}"
+        return None
+
     def fetch_page(self, url, referer=None):
         print(f"[*] Lade Seite: {url}")
         headers = {
@@ -182,8 +243,21 @@ class VoeDownloader:
                 return None
             scrambled = json_data[0]
             
-            # 2. Entschlüsseln mit Methode 7
-            decrypted_str = self.voe_decrypt_method7(scrambled)
+            # 2. Entschlüsseln versuchen
+            decrypted_str = None
+            
+            # Zuerst neue XOR-Methode versuchen
+            key = self.extract_xor_key(html)
+            if key:
+                print(f"[*] XOR Key für Entschlüsselung gefunden: {key}")
+                decrypted_str = self.voe_decrypt_xor(scrambled, key)
+                if decrypted_str.startswith("FAILED") or "direct_access_url" not in decrypted_str:
+                    print("[!] Neue XOR-Entschlüsselung fehlgeschlagen oder unvollständig. Versuche Methode 7...")
+                    decrypted_str = None
+            
+            if not decrypted_str:
+                decrypted_str = self.voe_decrypt_method7(scrambled)
+                
             if decrypted_str.startswith("FAILED"):
                 print(f"[!] Entschlüsselung fehlgeschlagen: {decrypted_str}")
                 return None
@@ -222,26 +296,42 @@ class VoeDownloader:
     def extract_voe_from_aniworld(self, html, base_url):
         """Sucht auf einer Episodenseite (AniWorld, s.to, serienstream) nach VOE-Hostern und wählt den besten Link."""
         def get_priority(lang_id, lang_label):
-            # Niedrigere Prioritätsnummer ist besser (bevorzugt Deutsch Dub, dann Deutsch Sub, dann Englisch, etc.)
             lang_id = str(lang_id or "").strip()
             lang_label = str(lang_label or "").lower().strip()
             
-            # Deutsch Dub (id 1, kein sub im Label)
-            if lang_id == "1" and "sub" not in lang_label:
-                return 1
-            # Deutsch Sub
-            if lang_id == "2" or ("sub" in lang_label and "deutsch" in lang_label):
-                return 2
-            # Englisch
-            if lang_id == "3" or "englisch" in lang_label or "english" in lang_label or (lang_id == "2" and "englisch" in lang_label):
-                return 3
+            pref = self.preferred_lang.lower()
             
-            # Generische Fallbacks basierend auf Text
+            # s.to/aniworld IDs:
+            # 1 = German (Dub)
+            # 2 = English (Dub/Sub)
+            # 3 = German Sub (Subbed)
+            
+            if pref == "german":
+                if lang_id == "1" or ("deutsch" in lang_label and "sub" not in lang_label):
+                    return 1
+                if lang_id == "3" or "sub" in lang_label:
+                    return 2
+                if lang_id == "2" or "english" in lang_label or "englisch" in lang_label:
+                    return 3
+            elif pref == "gersub":
+                if lang_id == "3" or ("deutsch" in lang_label and "sub" in lang_label):
+                    return 1
+                if lang_id == "1" or ("deutsch" in lang_label and "sub" not in lang_label):
+                    return 2
+                if lang_id == "2" or "english" in lang_label or "englisch" in lang_label:
+                    return 3
+            elif pref in ["english", "engsub"]:
+                if lang_id == "2" or "english" in lang_label or "englisch" in lang_label:
+                    return 1
+                if lang_id == "1" or ("deutsch" in lang_label and "sub" not in lang_label):
+                    return 2
+                if lang_id == "3" or "sub" in lang_label:
+                    return 3
+            
             if "deutsch" in lang_label:
                 return 1.5
-            if "englisch" in lang_label or "english" in lang_label:
+            if "english" in lang_label or "englisch" in lang_label:
                 return 3.5
-            
             return 99
 
         try:
@@ -310,7 +400,7 @@ class VoeDownloader:
             print(f"[!] Fehler beim Extrahieren des Serien-Links: {e}")
         return None
 
-    def get_direct_link(self, url):
+    def get_direct_link(self, url, email=None, password=None):
         print(f"[*] Analysiere: {url}")
         try:
             # 0. Falls es eine Serien-Hub-URL ist, den Hoster-Link extrahieren
@@ -330,28 +420,27 @@ class VoeDownloader:
             html, final_url = self.fetch_page(url, referer=original_url if is_series_hub else None)
             
             # Falls wir die Captcha-Bridge geladen haben, versuchen wir den automatischen Login
-            if "frameBridge" in html:
-                print("\n[!] Captcha-Blockade erkannt (Datacenter-IP).")
+            if "frameBridge" in html or "g-recaptcha" in html or "cf-challenge" in html:
+                print("\n[!] Captcha-Blockade oder Login-Abfrage erkannt.")
                 from urllib.parse import urlparse
                 parsed = urlparse(final_url)
                 base_url = f"{parsed.scheme}://{parsed.netloc}"
                 
-                # Wenn wir account.json haben, loggen wir uns ein
-                if not self.logged_in and os.path.exists("account.json"):
-                    print("[*] Lade gespeicherte Zugangsdaten aus account.json...")
-                    self.load_and_login(base_url)
-                
-                # Wenn wir immer noch nicht eingeloggt sind, fragen wir nach den Zugangsdaten
+                # Wenn wir übergebene Zugangsdaten oder account.json haben, loggen wir uns ein
                 if not self.logged_in:
+                    self.load_and_login(email, password, base_url)
+                
+                # Wenn wir immer noch nicht eingeloggt sind und im interaktiven Modus sind, fragen wir nach den Zugangsdaten
+                if not self.logged_in and sys.stdin.isatty():
                     print("[*] Um den Schutz vollautomatisch zu umgehen, erstelle dir ein kostenloses Konto auf SerienStream/s.to.")
                     print("[*] Gib deine Anmeldedaten ein (werden lokal in account.json gespeichert):")
-                    email = input("E-Mail: ").strip()
-                    password = input("Passwort: ").strip()
-                    if email and password:
+                    email_input = input("E-Mail: ").strip()
+                    password_input = input("Passwort: ").strip()
+                    if email_input and password_input:
                         import json
                         with open("account.json", "w") as f:
-                            json.dump({"email": email, "password": password}, f)
-                        self.load_and_login(base_url)
+                            json.dump({"email": email_input, "password": password_input}, f)
+                        self.load_and_login(email_input, password_input, base_url)
                 
                 if self.logged_in:
                     print("[*] Lade Seite nach erfolgreichem Login erneut...")
@@ -426,9 +515,9 @@ class VoeDownloader:
             print(f"[!] Analysefehler: {e}")
         return None
 
-    def download(self, url, dest_folder):
+    def download(self, url, dest_folder, email=None, password=None):
         print(f"\n--- VOE Downloader Start ---")
-        direct_link = self.get_direct_link(url)
+        direct_link = self.get_direct_link(url, email, password)
         
         # Falls der gefundene Link die Website selbst ist, verwerfen
         if direct_link and (direct_link == url or "/access/" in direct_link):
@@ -437,32 +526,48 @@ class VoeDownloader:
         if not direct_link:
             print("\n[!] AUTOMATISIERUNG DURCH WEBSITE-SCHUTZ GESCHEITERT")
             print("[*] Die Website blockiert automatisierte Anfragen.")
-            print("[*] So holst du dir den Link in 10 Sekunden selbst:")
-            print("    1. Öffne das Video im Browser (Firefox/Chrome).")
-            print("    2. Drücke F12 -> Reiter 'Netzwerk' (Network).")
-            print("    3. Suche oben im Filter nach 'mp4'.")
-            print("    4. Kopiere die URL (Rechtsklick -> Adresse kopieren) und füge sie hier ein.")
-            
-            manual = input("\nManueller Video-Link (oder Enter zum Abbrechen): ").strip()
-            if not manual: return
-            direct_link = manual
+            if sys.stdin.isatty():
+                print("[*] So holst du dir den Link in 10 Sekunden selbst:")
+                print("    1. Öffne das Video im Browser (Firefox/Chrome).")
+                print("    2. Drücke F12 -> Reiter 'Netzwerk' (Network).")
+                print("    3. Suche oben im Filter nach 'mp4'.")
+                print("    4. Kopiere die URL (Rechtsklick -> Adresse kopieren) und füge sie hier ein.")
+                
+                manual = input("\nManueller Video-Link (oder Enter zum Abbrechen): ").strip()
+                if not manual: return
+                direct_link = manual
+            else:
+                print("[!] Skript läuft im nicht-interaktiven Modus. Manueller Link-Eingabe übersprungen.")
+                return
+
+        # Dateiname ermitteln oder generieren
+        series_filename = self.parse_series_info(url)
 
         # Download-Entscheidung: yt-dlp oder Direkt-Download
         if ".m3u8" in direct_link or "voe.sx" in direct_link:
             print(f"[*] Nutze yt-dlp für den Download...")
             if not os.path.exists(dest_folder): os.makedirs(dest_folder)
-            cmd = [sys.executable, "-m", "yt_dlp", direct_link, "--referer", url, "-o", os.path.join(dest_folder, "%(title)s.%(ext)s")]
+            
+            if series_filename:
+                out_template = os.path.join(dest_folder, f"{series_filename}.%(ext)s")
+            else:
+                out_template = os.path.join(dest_folder, "%(title)s.%(ext)s")
+                
+            cmd = [sys.executable, "-m", "yt_dlp", direct_link, "--referer", url, "-o", out_template]
             try:
                 subprocess.run(cmd)
             except:
                 print("[!] Fehler beim Ausführen von yt-dlp.")
         else:
             # Normaler Dateidownload
-            name_match = re.search(r"[?&]n=([^&]+)", direct_link)
-            filename = requests.utils.unquote(name_match.group(1)) if name_match else os.path.basename(direct_link.split('?')[0])
-            filename = re.sub(r'[\\/*?:"<>|]', "_", filename)
-            if len(filename) > 100: filename = filename[:90] + ".mp4"
-            if not filename or filename == "_": filename = f"video_{int(time.time())}.mp4"
+            if series_filename:
+                filename = f"{series_filename}.mp4"
+            else:
+                name_match = re.search(r"[?&]n=([^&]+)", direct_link)
+                filename = requests.utils.unquote(name_match.group(1)) if name_match else os.path.basename(direct_link.split('?')[0])
+                filename = re.sub(r'[\\/*?:"<>|]', "_", filename)
+                if len(filename) > 100: filename = filename[:90] + ".mp4"
+                if not filename or filename == "_": filename = f"video_{int(time.time())}.mp4"
             
             dest_path = os.path.join(dest_folder, filename)
             if not os.path.exists(dest_folder): os.makedirs(dest_folder)
@@ -487,13 +592,32 @@ class VoeDownloader:
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("url", nargs="?")
-    parser.add_argument("output", nargs="?")
+    parser = argparse.ArgumentParser(description="VOE & SerienStream Video Downloader CLI")
+    parser.add_argument("url", nargs="?", help="Die URL des Videos oder der Serien-Episode")
+    parser.add_argument("output", nargs="?", help="Zielordner, in den das Video gespeichert werden soll")
+    parser.add_argument("--email", "-e", help="E-Mail für s.to/aniworld.to Login (zur Umgehung von Captchas)")
+    parser.add_argument("--password", "-p", help="Passwort für s.to/aniworld.to Login")
+    parser.add_argument("--lang", "-l", default="german", choices=["german", "english", "gersub", "engsub"], help="Bevorzugte Sprache")
     args = parser.parse_args()
     
     print("\n--- VOE Video Downloader CLI ---")
-    u = args.url or input("Video URL: ").strip()
-    if not u: exit()
-    o = args.output or input("Zielordner (Standard '.'): ").strip() or "."
-    VoeDownloader().download(u, o)
+    
+    u = args.url
+    if not u:
+        if sys.stdin.isatty():
+            u = input("Video URL: ").strip()
+        else:
+            print("[!] Fehler: Keine URL angegeben und keine interaktive Eingabe möglich.")
+            sys.exit(1)
+            
+    if not u:
+        sys.exit(0)
+        
+    o = args.output
+    if not o:
+        if sys.stdin.isatty():
+            o = input("Zielordner (Standard '.'): ").strip() or "."
+        else:
+            o = "."
+            
+    VoeDownloader(preferred_lang=args.lang).download(u, o, email=args.email, password=args.password)

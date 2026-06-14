@@ -17,10 +17,14 @@ fi
 # Paketverwaltung prüfen
 if command -v apt-get &> /dev/null; then
     echo "[*] Debian/Ubuntu-basiertes System erkannt."
-    echo "[*] Installiere ffmpeg, python3-pip und python3-venv..."
-    sudo apt-get update && sudo apt-get install -y ffmpeg python3-pip python3-venv
+    echo "[*] Installiere ffmpeg, python3-pip, python3-venv und nodejs..."
+    if command -v sudo &> /dev/null; then
+        sudo apt-get update && sudo apt-get install -y ffmpeg python3-pip python3-venv nodejs
+    else
+        apt-get update && apt-get install -y ffmpeg python3-pip python3-venv nodejs
+    fi
 else
-    echo "[!] Warnung: Paketmanager 'apt' nicht gefunden. Bitte stellen Sie sicher, dass 'ffmpeg', 'pip3' und 'venv' installiert sind."
+    echo "[!] Warnung: Paketmanager 'apt' nicht gefunden. Bitte stellen Sie sicher, dass 'ffmpeg', 'pip3', 'venv' und 'nodejs' installiert sind."
 fi
 
 # 2. Virtuelle Umgebung einrichten (verhindert PEP 668 Probleme auf Linux)
