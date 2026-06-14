@@ -188,6 +188,71 @@ class VoeDownloader:
                 return f"{series_name} - {season_str}{episode_str}"
         return None
 
+    def _has_aria2c(self):
+        """Prüft ob aria2c installiert ist."""
+        try:
+            subprocess.run(["aria2c", "--version"], capture_output=True, timeout=5)
+            return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+
+    def fast_download_file(self, direct_link, dest_path, referer):
+        """Schneller Download mit aria2c (16 parallele Verbindungen) oder Fallback auf Python-Download."""
+        dest_folder = os.path.dirname(dest_path)
+        filename = os.path.basename(dest_path)
+        
+        if self._has_aria2c():
+            print(f"[⚡] Nutze aria2c mit 16 parallelen Verbindungen für maximale Geschwindigkeit...")
+            cmd = [
+                "aria2c",
+                direct_link,
+                "-x", "16",          # 16 Verbindungen zum gleichen Server
+                "-s", "16",          # 16 Splits
+                "-k", "1M",          # Mindestgröße pro Split: 1MB
+                "-d", dest_folder,   # Zielordner
+                "-o", filename,      # Dateiname
+                f"--referer={referer}",
+                "--file-allocation=none",
+                "--console-log-level=notice",
+                "--summary-interval=5",
+                "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            ]
+            try:
+                result = subprocess.run(cmd)
+                if result.returncode == 0:
+                    print(f"[+] Download erfolgreich abgeschlossen: {dest_path}")
+                    return True
+                else:
+                    print(f"[!] aria2c beendet mit Code {result.returncode}. Versuche Python-Fallback...")
+            except Exception as e:
+                print(f"[!] aria2c Fehler: {e}. Versuche Python-Fallback...")
+        else:
+            print("[*] aria2c nicht installiert. Nutze Python-Download (für mehr Speed: sudo apt install aria2)")
+
+        # Python-Fallback mit großem Buffer
+        print(f"[*] Downloade Video nach: {dest_path}")
+        try:
+            r = self.scraper.get(direct_link, stream=True, timeout=60, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Referer": referer
+            })
+            r.raise_for_status()
+            total = int(r.headers.get('content-length', 0))
+            if total < 500000:
+                print("[!] Fehler: Der Link führt nicht zu einer Videodatei (Inhalt zu klein).")
+                return False
+            bar = tqdm(total=total, unit='iB', unit_scale=True, desc=filename[:30])
+            with open(dest_path, 'wb') as f:
+                for chunk in r.iter_content(1048576):  # 1MB Chunks statt 256KB
+                    bar.update(len(chunk))
+                    f.write(chunk)
+            bar.close()
+            print(f"[+] Download erfolgreich!")
+            return True
+        except Exception as e:
+            print(f"[!] Fehler beim Download: {e}")
+            return False
+
     def fetch_page(self, url, referer=None):
         print(f"[*] Lade Seite: {url}")
         headers = {
@@ -589,52 +654,44 @@ class VoeDownloader:
         # Dateiname ermitteln oder generieren
         series_filename = self.parse_series_info(url)
 
-        # Download-Entscheidung: yt-dlp oder Direkt-Download
-        if ".m3u8" in direct_link or "voe.sx" in direct_link:
-            print(f"[*] Nutze yt-dlp für den Download...")
-            if not os.path.exists(dest_folder): os.makedirs(dest_folder)
+        # Dateiname bestimmen
+        if series_filename:
+            filename = f"{series_filename}.mp4"
+        else:
+            name_match = re.search(r"[?&]n=([^&]+)", direct_link)
+            filename = requests.utils.unquote(name_match.group(1)) if name_match else os.path.basename(direct_link.split('?')[0])
+            filename = re.sub(r'[\\/*?:"<>|]', "_", filename)
+            if len(filename) > 100: filename = filename[:90] + ".mp4"
+            if not filename or filename == "_": filename = f"video_{int(time.time())}.mp4"
+
+        if not os.path.exists(dest_folder): os.makedirs(dest_folder)
+
+        # Download-Entscheidung: yt-dlp für HLS-Streams, aria2c/direkt für MP4
+        if ".m3u8" in direct_link:
+            print(f"[*] HLS-Stream erkannt. Nutze yt-dlp mit parallelen Fragments...")
             
             if series_filename:
                 out_template = os.path.join(dest_folder, f"{series_filename}.%(ext)s")
             else:
                 out_template = os.path.join(dest_folder, "%(title)s.%(ext)s")
                 
-            cmd = [sys.executable, "-m", "yt_dlp", direct_link, "--referer", url, "-o", out_template]
+            cmd = [
+                sys.executable, "-m", "yt_dlp",
+                direct_link,
+                "--referer", url,
+                "-o", out_template,
+                "--concurrent-fragments", "8",  # 8 parallele Fragment-Downloads
+                "--retries", "10",
+                "--fragment-retries", "10",
+            ]
             try:
                 subprocess.run(cmd)
             except:
                 print("[!] Fehler beim Ausführen von yt-dlp.")
         else:
-            # Normaler Dateidownload
-            if series_filename:
-                filename = f"{series_filename}.mp4"
-            else:
-                name_match = re.search(r"[?&]n=([^&]+)", direct_link)
-                filename = requests.utils.unquote(name_match.group(1)) if name_match else os.path.basename(direct_link.split('?')[0])
-                filename = re.sub(r'[\\/*?:"<>|]', "_", filename)
-                if len(filename) > 100: filename = filename[:90] + ".mp4"
-                if not filename or filename == "_": filename = f"video_{int(time.time())}.mp4"
-            
+            # MP4 Direkt-Download mit aria2c (16x schneller) oder Python-Fallback
             dest_path = os.path.join(dest_folder, filename)
-            if not os.path.exists(dest_folder): os.makedirs(dest_folder)
-            
-            print(f"[*] Downloade Video nach: {dest_path}")
-            try:
-                r = self.scraper.get(direct_link, stream=True, timeout=60)
-                r.raise_for_status()
-                total = int(r.headers.get('content-length', 0))
-                if total < 500000: # Kleiner als 500KB ist wahrscheinlich kein Video
-                    print("[!] Fehler: Der Link führt nicht zu einer Videodatei (Inhalt zu klein).")
-                    return
-                bar = tqdm(total=total, unit='iB', unit_scale=True, desc=filename[:30])
-                with open(dest_path, 'wb') as f:
-                    for chunk in r.iter_content(262144):
-                        bar.update(len(chunk))
-                        f.write(chunk)
-                bar.close()
-                print(f"[+] Download erfolgreich!")
-            except Exception as e:
-                print(f"[!] Fehler beim Download: {e}")
+            self.fast_download_file(direct_link, dest_path, url)
 
 if __name__ == "__main__":
     import argparse

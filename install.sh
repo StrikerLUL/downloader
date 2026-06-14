@@ -17,11 +17,11 @@ fi
 # Paketverwaltung prüfen
 if command -v apt-get &> /dev/null; then
     echo "[*] Debian/Ubuntu-basiertes System erkannt."
-    echo "[*] Installiere ffmpeg, python3-pip, python3-venv und nodejs..."
+    echo "[*] Installiere ffmpeg, python3-pip, python3-venv, nodejs und aria2..."
     if command -v sudo &> /dev/null; then
-        sudo apt-get update && sudo apt-get install -y ffmpeg python3-pip python3-venv nodejs
+        sudo apt-get update && sudo apt-get install -y ffmpeg python3-pip python3-venv nodejs aria2
     else
-        apt-get update && apt-get install -y ffmpeg python3-pip python3-venv nodejs
+        apt-get update && apt-get install -y ffmpeg python3-pip python3-venv nodejs aria2
     fi
 else
     echo "[!] Warnung: Paketmanager 'apt' nicht gefunden. Bitte stellen Sie sicher, dass 'ffmpeg', 'pip3', 'venv' und 'nodejs' installiert sind."
