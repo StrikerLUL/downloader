@@ -13,7 +13,7 @@ class VoeDownloader:
     def __init__(self, preferred_lang="german"):
         # Erstellt einen Scraper, der wie ein echter Browser agiert
         self.scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False})
-        self.mirrors = ["rebeccasciencestreet.com", "nicholasbreakplan.com", "voe.sx", "ceremonioustakeintoaccountcustomer.com"]
+        self.mirrors = ["juliewomanwish.com", "rebeccasciencestreet.com", "nicholasbreakplan.com", "voe.sx", "ceremonioustakeintoaccountcustomer.com"]
         self.logged_in = False
         self.preferred_lang = preferred_lang
 
