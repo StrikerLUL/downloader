@@ -194,6 +194,52 @@ class VoeDownloader:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Referer": referer if referer else url
         }
+        
+        # Falls es ein Weiterleitungs-Link ist, versuchen wir die DDoS-Guard / Cloudflare Blockade zu umgehen
+        is_redirect_link = "/r?t=" in url or "/redirect/" in url or "/r/" in url
+        if is_redirect_link:
+            print("[*] Weiterleitungs-Link erkannt. Versuche Direct-Location-Bypass...")
+            try:
+                # Mit allow_redirects=False abfragen, um die 302 Location direkt zu erhalten
+                res = self.scraper.get(url, headers=headers, allow_redirects=False, timeout=15)
+                location = res.headers.get("Location")
+                if location:
+                    print(f"[+] Weiterleitungs-Ziel gefunden: {location}")
+                    # Video-ID extrahieren
+                    video_id_match = re.search(r'/e/([a-z0-9]{12})', location)
+                    if video_id_match:
+                        video_id = video_id_match.group(1)
+                        print(f"[+] Video-ID erfolgreich extrahiert: {video_id}")
+                        
+                        # Alle Mirrors nacheinander durchprobieren
+                        for mirror in self.mirrors:
+                            mirror_url = f"https://{mirror}/e/{video_id}"
+                            print(f"[*] Versuche Mirror-Abfrage: {mirror_url}")
+                            try:
+                                m_res = self.scraper.get(mirror_url, headers=headers, timeout=15)
+                                if m_res.status_code == 200:
+                                    # Prüfen, ob eine JS-Weiterleitung auf die aktive Domain vorliegt
+                                    if "window.location.href" in m_res.text:
+                                        m_js = re.search(r"window\.location\.href\s*=\s*['\"]([^'\"]+)['\"]", m_res.text)
+                                        if m_js:
+                                            active_url = m_js.group(1)
+                                            print(f"[+] Aktive Player-URL über JS-Redirect erkannt: {active_url}")
+                                            # Die aktive Player-Seite laden
+                                            headers["Referer"] = mirror_url
+                                            active_res = self.scraper.get(active_url, headers=headers, timeout=15)
+                                            print(f"[+] Aktive Seite geladen. Status: {active_res.status_code} | Länge: {len(active_res.text)} Bytes")
+                                            return active_res.text, active_res.url
+                                    
+                                    # Fallback falls keine JS-Weiterleitung vorliegt aber die Seite geladen wurde
+                                    if "application/json" in m_res.text or "window.c" in m_res.text:
+                                        print("[+] Mirror-Seite direkt geladen.")
+                                        return m_res.text, m_res.url
+                            except Exception as mirror_err:
+                                print(f"[!] Fehler bei Mirror {mirror}: {mirror_err}")
+            except Exception as redirect_err:
+                print(f"[!] Fehler bei Direct-Location-Bypass: {redirect_err}. Weiche auf Standard-Abfrage aus...")
+
+        # Standard-Abfrage falls der Bypass fehlschlägt oder es keine Weiterleitungs-URL ist
         res = self.scraper.get(url, headers=headers, timeout=15)
         print(f"[*] Status: {res.status_code} | Finale URL: {res.url} | Länge: {len(res.text)} Bytes")
         
