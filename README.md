@@ -49,17 +49,17 @@ Nach der Installation können Sie den Downloader über das erstellte Wrapper-Skr
 
 *   **Direkte IP-Episode von SerienStream (z. B. The Rookie):**
     ```bash
-    ./run.sh "http://186.2.175.5/serie/the-rookie/staffel-8/episode-13" "/home/user/downloads"
+    ./run.sh "Link to Serie/Movie" "/home/user/downloads"
     ```
 
 *   **Direkter AniWorld-Episoden-Link:**
     ```bash
-    ./run.sh "https://aniworld.to/anime/stream/marriagetoxin/staffel-1/episode-1" "./downloads"
+    ./run.sh "Link to Serie/Movie" "./downloads"
     ```
 
 *   **Direkter VOE-Player Link:**
     ```bash
-    ./run.sh "https://voe.sx/e/mozwgfjc7pgy" "."
+    ./run.sh "Link to Serie/Movie" "."
     ```
 
 ---
@@ -91,7 +91,7 @@ Hier ist eine einfache Schritt-für-Schritt-Anleitung, um das Projekt über GitH
     *   Kopieren Sie die Repository-URL (z. B. `https://github.com/DEIN_BENUTZERNAME/Vid_download.git`).
 
 2.  **Git im lokalen Ordner initialisieren**:
-    Öffnen Sie die PowerShell in Ihrem lokalen Ordner `c:\Users\cilli\OneDrive\Desktop\Vid_download` und führen Sie aus:
+    Öffnen Sie die PowerShell in Ihrem lokalen Ordner  und führen Sie aus:
     ```powershell
     # Git initialisieren
     git init
@@ -126,7 +126,7 @@ Hier ist eine einfache Schritt-für-Schritt-Anleitung, um das Projekt über GitH
     git clone https://github.com/DEIN_BENUTZERNAME/Vid_download.git
     cd Vid_download
     ```
-    *(Hinweis: Bei privaten Repositories werden Sie nach Ihrem GitHub-Benutzernamen und einem [Personal Access Token](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens) als Passwort gefragt).*
+   
 
 3.  **Installieren & Loslegen**:
     ```bash
