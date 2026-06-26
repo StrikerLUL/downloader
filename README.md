@@ -134,7 +134,7 @@ Hier ist eine einfache Schritt-für-Schritt-Anleitung, um das Projekt über GitH
     ./install.sh
     
     # Download starten
-    ./run.sh "http://186.2.175.5/serie/the-rookie/staffel-8/episode-13" "/pfad/zu/deinen/downloads"
+    ./run.sh "Link to Serie/Movie" "/pfad/zu/deinen/downloads"
     ```
 
 ---
