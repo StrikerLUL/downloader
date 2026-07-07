@@ -299,7 +299,7 @@ class VoeDownloader:
                 direct_link,
                 "-x", "16",
                 "-s", "16",
-                "--min-split-size=512K",
+                "--min-split-size=1M",
                 "--disk-cache=64M",
                 "-d", dest_folder,   # Zielordner
                 "-o", filename,      # Dateiname
@@ -817,7 +817,7 @@ class VoeDownloader:
                 if self._has_aria2c():
                     cmd.extend([
                         "--downloader", "aria2c",
-                        "--downloader-args", "aria2c:--min-split-size=512K --max-connection-per-server=16 --split=16 --disk-cache=64M",
+                        "--downloader-args", "aria2c:--min-split-size=1M --max-connection-per-server=16 --split=16 --disk-cache=64M",
                         "--concurrent-fragments", "16"
                     ])
                 else:
