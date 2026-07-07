@@ -1,0 +1,14 @@
+[Unit]
+Description=VOE Video Downloader Spool Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/var/spool/vid_download
+ExecStart=/bin/bash -c 'while true; do if [ -s urls.txt ]; then mv urls.txt urls.tmp && touch urls.txt && chmod 666 urls.txt && /usr/local/bin/vid-download --urls urls.tmp downloads && rm -f urls.tmp; fi; sleep 10; done'
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
