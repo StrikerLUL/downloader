@@ -110,15 +110,21 @@ class VoeDownloader:
         # Erstellt einen Scraper, der wie ein echter Browser agiert
         self.scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False})
         self.mirrors = [
-            "nicolehappyoutside.com",
+            "voe.sx",
+            "e.voe.sx",
+            "voe-unblock.com",
+            "generousruler.com",
+            "launcha.com",
+            "tuta.to",
+            "simonunhingedreassure.com",
+            "stevenunlinedfar.com",
+            "fraudulentmark.com",
+            "gracefuldefensesupreme.com",
             "juliewomanwish.com",
             "rebeccasciencestreet.com",
             "nicholasbreakplan.com",
-            "voe.sx",
             "ceremonioustakeintoaccountcustomer.com",
-            "fittinglyproperunsuitable.com",
-            "voesx.com",
-            "yodish.com"
+            "nicolehappyoutside.com",
         ]
         self.logged_in = False
         self.preferred_lang = preferred_lang
@@ -426,15 +432,18 @@ class VoeDownloader:
                                         m_js = re.search(r"window\.location\.href\s*=\s*['\"]([^'\"]+)['\"]", m_res.text)
                                         if m_js:
                                             active_url = m_js.group(1)
+                                            if "hugedomains" in active_url.lower() or "payment-plan" in active_url.lower() or "domain" in active_url.lower():
+                                                logger.warning(f"[!] Mirror {mirror} leitet auf eine geparkte/Domain-Kauf-Seite weiter ({active_url}). Überspringe...")
+                                                continue
                                             logger.info(f"[+] Aktive Player-URL über JS-Redirect erkannt: {active_url}")
                                             # Die aktive Player-Seite laden
                                             headers["Referer"] = mirror_url
                                             active_res = self.scraper.get(active_url, headers=headers, timeout=15)
                                             logger.info(f"[+] Aktive Seite geladen. Status: {active_res.status_code} | Länge: {len(active_res.text)} Bytes")
-                                            if active_res.status_code == 200:
+                                            if active_res.status_code == 200 and ("application/json" in active_res.text or "window.c" in active_res.text):
                                                 return active_res.text, active_res.url
                                             else:
-                                                logger.warning(f"[!] Mirror {mirror} lieferte Status {active_res.status_code}. Versuche nächsten Mirror...")
+                                                logger.warning(f"[!] Mirror {mirror} lieferte ungültige Seite (Status: {active_res.status_code}). Versuche nächsten Mirror...")
                                                 continue
                                     
                                     # Fallback falls keine JS-Weiterleitung vorliegt aber die Seite geladen wurde
@@ -758,9 +767,14 @@ class VoeDownloader:
                         if "window.location.href" in res.text:
                             m = re.search(r"window\.location\.href\s*=\s*['\"]([^'\"]+)['\"]", res.text)
                             if m:
-                                active_res = self.scraper.get(m.group(1), headers={"Referer": embed_url}, timeout=10)
-                                if active_res.status_code == 200:
-                                    res = active_res
+                                act_target = m.group(1)
+                                if not any(bad in act_target.lower() for bad in ["hugedomains", "payment-plan", "domain"]):
+                                    try:
+                                        active_res = self.scraper.get(act_target, headers={"Referer": embed_url}, timeout=10)
+                                        if active_res.status_code == 200 and ("application/json" in active_res.text or "window.c" in active_res.text):
+                                            res = active_res
+                                    except Exception:
+                                        pass
                         
                         link = self.decrypt_page_source(res.text) or self.extract_direct_url(res.text)
                         if link:
@@ -785,21 +799,8 @@ class VoeDownloader:
             direct_link = None
 
         if not direct_link:
-            logger.error("[!] AUTOMATISIERUNG DURCH WEBSITE-SCHUTZ GESCHEITERT")
-            logger.info("[*] Die Website blockiert automatisierte Anfragen.")
-            if sys.stdin.isatty():
-                logger.info("[*] So holst du dir den Link in 10 Sekunden selbst:")
-                logger.info("    1. Öffne das Video im Browser (Firefox/Chrome).")
-                logger.info("    2. Drücke F12 -> Reiter 'Netzwerk' (Network).")
-                logger.info("    3. Suche oben im Filter nach 'mp4'.")
-                logger.info("    4. Kopiere die URL (Rechtsklick -> Adresse kopieren) und füge sie hier ein.")
-                
-                manual = input("\nManueller Video-Link (oder Enter zum Abbrechen): ").strip()
-                if not manual: return False
-                direct_link = manual
-            else:
-                logger.error("[!] Skript läuft im nicht-interaktiven Modus. Manueller Link-Eingabe übersprungen.")
-                return False
+            logger.error("[!] AUTOMATISIERUNG GESCHEITERT: Kein gültiger Video-Stream von den VOE-Mirrors antwortet aktuell.")
+            return False
 
         # Dateiname ermitteln oder generieren
         series_filename = self.parse_series_info(url)
