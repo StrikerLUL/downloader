@@ -6,6 +6,11 @@ import shutil
 import tempfile
 import json
 
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
+
 # Ensure we can import test_cases from current directory
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_cases

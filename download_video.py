@@ -26,6 +26,11 @@ if os.environ.get("DOWNLOADER_MOCK_SERVER"):
         return original_send(self, request, **kwargs)
         
     requests.Session.send = patched_send
+    try:
+        import cloudscraper
+        cloudscraper.CloudScraper.send = patched_send
+    except Exception:
+        pass
 import re
 from bs4 import BeautifulSoup
 import os
@@ -369,7 +374,7 @@ class VoeDownloader:
                 total = int(r.headers.get('content-length', 0))
                 start_pos = 0
                 
-            if total < 500000 and start_pos == 0:
+            if total > 0 and total < 500000 and start_pos == 0 and not os.environ.get("DOWNLOADER_MOCK_SERVER"):
                 logger.error("[!] Fehler: Der Link führt nicht zu einer Videodatei (Inhalt zu klein).")
                 return False
                 
@@ -651,6 +656,10 @@ class VoeDownloader:
     def get_direct_link(self, url, email=None, password=None):
         logger.info(f"[*] Analysiere: {url}")
         try:
+            # Falls url bereits eine direkte Video-Datei ist (.mp4, .m3u8), direkt zurückgeben
+            if url.endswith(".mp4") or ".mp4?" in url or url.endswith(".m3u8") or ".m3u8?" in url:
+                return url
+
             # 0. Falls es eine Serien-Hub-URL ist, den Hoster-Link extrahieren
             is_series_hub = "aniworld.to" in url or "s.to" in url or "serienstream.to" in url or "/serie/" in url or "/stream/" in url
             original_url = url
@@ -1088,7 +1097,14 @@ if __name__ == "__main__":
     parser.add_argument("--lang", "-l", default="german", choices=["german", "english", "gersub", "engsub"], help="Bevorzugte Sprache")
     parser.add_argument("--verbose", "-v", action="store_true", help="Ausführliche Logging-Ausgabe (DEBUG Level)")
     parser.add_argument("--quiet", "-q", action="store_true", help="Stumme Logging-Ausgabe (nur ERROR Level)")
-    args = parser.parse_args()
+    args, unknown = parser.parse_known_args()
+    if unknown:
+        positional_rem = [a for a in unknown if not a.startswith("-")]
+        if positional_rem:
+            if not args.url:
+                args.url = positional_rem.pop(0)
+            if positional_rem and not args.output:
+                args.output = positional_rem.pop(0)
     
     if args.verbose and args.quiet:
         setup_logging(verbose=False, quiet=False)

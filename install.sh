@@ -70,10 +70,8 @@ chmod +x "$INSTALL_DIR/download_video.py"
 # Create the global symlink
 ln -sf "$INSTALL_DIR/vid-download" /usr/local/bin/vid-download
 
-# Make update.sh executable as well
-if [ -f "$INSTALL_DIR/update.sh" ]; then
-    chmod +x "$INSTALL_DIR/update.sh"
-fi
+# Make update.sh and run.sh executable as well
+chmod +x "$INSTALL_DIR"/*.sh 2>/dev/null || true
 
 # 6. systemd service installation
 echo "[*] Configuring systemd service..."

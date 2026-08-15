@@ -23,8 +23,13 @@ SOURCE_DIR="$( cd "$( dirname "$(readlink -f "${BASH_SOURCE[0]}")" )" &> /dev/nu
 echo "[*] Navigating to source directory: $SOURCE_DIR"
 cd "$SOURCE_DIR" || exit 1
 
+echo "[*] Stashing any local changes before pulling..."
+git stash --include-untracked || true
+
 echo "[*] Pulling latest changes from git repository..."
-git pull
+git fetch origin main || git fetch
+git reset --hard origin/main || git pull --rebase
+chmod +x *.sh download_video.py 2>/dev/null || true
 
 # Verify venv exists
 if [ ! -d "venv" ]; then
