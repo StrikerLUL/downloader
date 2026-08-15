@@ -104,7 +104,17 @@ class VoeDownloader:
     def __init__(self, preferred_lang="german"):
         # Erstellt einen Scraper, der wie ein echter Browser agiert
         self.scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False})
-        self.mirrors = ["juliewomanwish.com", "rebeccasciencestreet.com", "nicholasbreakplan.com", "voe.sx", "ceremonioustakeintoaccountcustomer.com"]
+        self.mirrors = [
+            "nicolehappyoutside.com",
+            "juliewomanwish.com",
+            "rebeccasciencestreet.com",
+            "nicholasbreakplan.com",
+            "voe.sx",
+            "ceremonioustakeintoaccountcustomer.com",
+            "fittinglyproperunsuitable.com",
+            "voesx.com",
+            "yodish.com"
+        ]
         self.logged_in = False
         self.preferred_lang = preferred_lang
 
@@ -416,7 +426,11 @@ class VoeDownloader:
                                             headers["Referer"] = mirror_url
                                             active_res = self.scraper.get(active_url, headers=headers, timeout=15)
                                             logger.info(f"[+] Aktive Seite geladen. Status: {active_res.status_code} | Länge: {len(active_res.text)} Bytes")
-                                            return active_res.text, active_res.url
+                                            if active_res.status_code == 200:
+                                                return active_res.text, active_res.url
+                                            else:
+                                                logger.warning(f"[!] Mirror {mirror} lieferte Status {active_res.status_code}. Versuche nächsten Mirror...")
+                                                continue
                                     
                                     # Fallback falls keine JS-Weiterleitung vorliegt aber die Seite geladen wurde
                                     if "application/json" in m_res.text or "window.c" in m_res.text:
@@ -725,25 +739,29 @@ class VoeDownloader:
                     self.scraper.get(f"https://voe.sx/session/sync?token={token}&redirect={url}")
             except: pass
 
-            # 5. Alle Mirrors nach einem Download-Button oder Link absuchen
+            # 5. Alle Mirrors nach einem funktionierenden Video-Stream absuchen
             for domain in self.mirrors:
-                dl_url = f"https://{domain}/{video_id}/download"
+                embed_url = f"https://{domain}/e/{video_id}"
                 logger.info(f"[*] Prüfe Mirror {domain}...")
                 try:
-                    res = self.scraper.get(dl_url, headers={"Referer": url}, timeout=10)
-                    if "window.location.href =" in res.text:
-                        m = re.search(r"window\.location\.href\s*=\s*['\"]([^'\"]+)['\"]", res.text)
-                        if m: res = self.scraper.get(m.group(1), headers={"Referer": dl_url})
-                    
-                    link = self.extract_direct_url(res.text)
-                    if link: return link
-                except: continue
+                    res = self.scraper.get(embed_url, headers={"Referer": url}, timeout=10)
+                    if res.status_code == 200:
+                        if "window.location.href" in res.text:
+                            m = re.search(r"window\.location\.href\s*=\s*['\"]([^'\"]+)['\"]", res.text)
+                            if m:
+                                active_res = self.scraper.get(m.group(1), headers={"Referer": embed_url}, timeout=10)
+                                if active_res.status_code == 200:
+                                    res = active_res
+                        
+                        link = self.decrypt_page_source(res.text) or self.extract_direct_url(res.text)
+                        if link:
+                            return link
+                except Exception as mirror_err:
+                    logger.warning(f"[!] Fehler bei Mirror {domain}: {mirror_err}")
+                    continue
 
-            # Letzter automatischer Versuch
-            for domain in [final_url.split("/")[2], "voe.sx"]:
-                check_url = f"https://{domain}/{video_id}"
-                logger.info(f"[*] Versuche Extraktion via {domain}...")
-                return check_url
+            logger.error("[!] Konnte keinen funktionierenden Video-Stream auf den Mirrors finden.")
+            return None
 
         except Exception as e:
             logger.error(f"[!] Analysefehler: {e}")
@@ -1118,6 +1136,8 @@ if __name__ == "__main__":
         if args.email and args.password:
             temp_downloader.load_and_login(args.email, args.password)
         base_url = args.url
+        if args.output and not is_url(args.output):
+            dest_folder = args.output
         range_urls = generate_urls_from_range_args(args.range, args.from_val, args.to_val, base_url, temp_downloader.scraper)
         urls_to_download.extend(range_urls)
         
