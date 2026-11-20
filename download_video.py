@@ -460,7 +460,8 @@ class VoeDownloader:
         logger.info(f"[*] Status: {res.status_code} | Finale URL: {res.url} | Länge: {len(res.text)} Bytes")
         
         # Cloudflare oder Blockierungserkennung
-        if "cloudflare" in res.text.lower() or "just a moment" in res.text.lower():
+        low = res.text.lower()
+        if "just a moment" in low or "cf-challenge" in low:
             logger.warning("[!] Warnung: Cloudflare-Schutz auf dieser Seite erkannt!")
         elif res.status_code == 403:
             logger.warning("[!] Warnung: Zugriff verweigert (403 Forbidden). Möglicherweise wird die IP-Adresse blockiert.")
@@ -1090,22 +1091,31 @@ if __name__ == "__main__":
     parser.add_argument("--urls", help="Pfad zu einer Textdatei mit einer URL pro Zeile")
     parser.add_argument("--workers", type=int, default=4, help="Anzahl der parallelen Worker-Threads (Standard: 4)")
     parser.add_argument("--batch", nargs="+", help="Liste von URLs zum Herunterladen (durch Leerzeichen getrennt)")
-    parser.add_argument("--range", help="Staffelbereich-Generierungs-Flag (Format: 'S01E01-S01E10' oder ein URL-Template mit '{}')")
-    parser.add_argument("--from", dest="from_val", help="Startwert für den Bereich")
-    parser.add_argument("--to", dest="to_val", help="Endwert für den Bereich")
+    parser.add_argument("--range", "-range", help="Staffelbereich-Generierungs-Flag (Format: 'S01E01-S01E10' oder ein URL-Template mit '{}')")
+    parser.add_argument("--from", "-from", dest="from_val", help="Startwert für den Bereich")
+    parser.add_argument("--to", "-to", dest="to_val", help="Endwert für den Bereich")
     parser.add_argument("--email", "-e", help="E-Mail für s.to/aniworld.to Login (zur Umgehung von Captchas)")
     parser.add_argument("--password", "-p", help="Passwort für s.to/aniworld.to Login")
     parser.add_argument("--lang", "-l", default="german", choices=["german", "english", "gersub", "engsub"], help="Bevorzugte Sprache")
     parser.add_argument("--verbose", "-v", action="store_true", help="Ausführliche Logging-Ausgabe (DEBUG Level)")
     parser.add_argument("--quiet", "-q", action="store_true", help="Stumme Logging-Ausgabe (nur ERROR Level)")
     args, unknown = parser.parse_known_args()
-    if unknown:
-        positional_rem = [a for a in unknown if not a.startswith("-")]
-        if positional_rem:
-            if not args.url:
-                args.url = positional_rem.pop(0)
-            if positional_rem and not args.output:
-                args.output = positional_rem.pop(0)
+    positional_rem = [a for a in unknown if not a.startswith("-")]
+    unknown_opts = [a for a in unknown if a.startswith("-")]
+
+    # Ein Staffelbereich (z. B. S01E01-S01E07) ohne --range davor wird trotzdem erkannt
+    if not args.range:
+        for a in list(positional_rem):
+            if re.match(r'^S\d+E\d+-S\d+E\d+$', a, re.IGNORECASE):
+                args.range = a
+                positional_rem.remove(a)
+                break
+
+    if positional_rem:
+        if not args.url:
+            args.url = positional_rem.pop(0)
+        if positional_rem and not args.output:
+            args.output = positional_rem.pop(0)
     
     if args.verbose and args.quiet:
         setup_logging(verbose=False, quiet=False)
@@ -1113,6 +1123,10 @@ if __name__ == "__main__":
         setup_logging(verbose=args.verbose, quiet=args.quiet)
         
     logger.info("--- VOE Video Downloader CLI ---")
+    if unknown_opts:
+        logger.warning(f"[!] Unbekannte Optionen werden ignoriert: {' '.join(unknown_opts)}")
+    if positional_rem:
+        logger.warning(f"[!] Überzählige Argumente werden ignoriert: {' '.join(positional_rem)}")
     
     is_batch_mode = bool(args.urls or args.batch or args.range)
     
@@ -1169,7 +1183,15 @@ if __name__ == "__main__":
                 
         if not u:
             sys.exit(0)
-            
+
+        # Serien-Übersichtsseite ohne Staffel/Episode: dort gibt es keinen Hoster
+        if re.search(r'/(?:serie|stream|anime/stream)/[^/?#]+/?(?:[?#].*)?$', u):
+            logger.error("[!] Das ist die Übersichtsseite der Serie, nicht eine einzelne Episode.")
+            logger.error("[!] Gib einen Bereich an, z. B.:")
+            logger.error(f'    ./run.sh "{u}" "ZIELORDNER" --range S01E01-S01E07')
+            logger.error("[!] Oder direkt eine Episode: .../staffel-1/episode-1")
+            sys.exit(1)
+
         o = args.output
         if not o:
             if sys.stdin.isatty():
@@ -1182,4 +1204,4 @@ if __name__ == "__main__":
         sys.exit(0 if success else 1)
     else:
         results = download_batch(urls_to_download, dest_folder, args.email, args.password, args.lang, args.workers)
-        sys.exit(0)
+        sys.exit(0 if results and all(results.values()) else 1)

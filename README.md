@@ -57,6 +57,12 @@ Nach der Installation können Sie den Downloader über das erstellte Wrapper-Skr
     ./run.sh "Link to Serie/Movie" "./downloads"
     ```
 
+*   **Ganze Staffel / Episodenbereich (Serien-URL ohne Episode):**
+    ```bash
+    ./run.sh "http://186.2.175.5/serie/swat-exiles" "/media/Serien/S.W.A.T.Exiles" --range S01E01-S01E07
+    ```
+    (`-range` mit nur einem Bindestrich funktioniert ebenfalls.)
+
 *   **Direkter VOE-Player Link:**
     ```bash
     ./run.sh "Link to Serie/Movie" "."
