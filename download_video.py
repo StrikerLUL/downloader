@@ -49,6 +49,12 @@ active_downloads = set()
 active_downloads_lock = threading.Lock()
 logger = logging.getLogger("downloads")
 
+# Zuletzt funktionierender VOE-Mirror (wird von allen Episoden/Threads geteilt,
+# damit nicht jede Episode wieder alle toten Mirrors abklappern muss)
+_good_mirror = None
+_good_mirror_lock = threading.Lock()
+MIRROR_TIMEOUT = (5, 12)  # (Verbindungsaufbau, Lesen) in Sekunden
+
 def setup_logging(verbose=False, quiet=False):
     if quiet:
         level = logging.ERROR
@@ -397,6 +403,74 @@ class VoeDownloader:
             logger.error(f"[!] Fehler beim Download: {e}")
             return False
 
+    @staticmethod
+    def _is_player_page(text):
+        return "application/json" in text or "window.c" in text
+
+    def _try_mirror(self, mirror, video_id, referer):
+        """Lädt die Player-Seite eines Mirrors. Gibt (html, url) zurück oder None."""
+        mirror_url = f"https://{mirror}/e/{video_id}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": referer,
+        }
+        # Eigene Session pro Abfrage, damit parallele Abfragen sich nicht stören
+        scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False})
+        try:
+            res = scraper.get(mirror_url, headers=headers, timeout=MIRROR_TIMEOUT)
+            if res.status_code != 200:
+                logger.debug(f"[-] Mirror {mirror}: Status {res.status_code}")
+                return None
+            m_js = re.search(r"window\.location\.href\s*=\s*['\"]([^'\"]+)['\"]", res.text)
+            if m_js:
+                active_url = m_js.group(1)
+                if any(bad in active_url.lower() for bad in ["hugedomains", "payment-plan", "domain"]):
+                    logger.debug(f"[-] Mirror {mirror} ist geparkt ({active_url})")
+                    return None
+                headers["Referer"] = mirror_url
+                active_res = scraper.get(active_url, headers=headers, timeout=MIRROR_TIMEOUT)
+                if active_res.status_code == 200 and self._is_player_page(active_res.text):
+                    return active_res.text, active_res.url
+                return None
+            if self._is_player_page(res.text):
+                return res.text, res.url
+        except Exception as e:
+            logger.debug(f"[-] Mirror {mirror}: {e}")
+        return None
+
+    def find_mirror_page(self, video_id, referer):
+        """Sucht einen funktionierenden Mirror: erst den zuletzt erfolgreichen, dann alle parallel."""
+        global _good_mirror
+        with _good_mirror_lock:
+            cached = _good_mirror
+        if cached:
+            result = self._try_mirror(cached, video_id, referer)
+            if result:
+                logger.info(f"[+] Mirror {cached} (bewährt) liefert den Player.")
+                return result
+
+        others = [m for m in self.mirrors if m != cached]
+        logger.info(f"[*] Prüfe {len(others)} VOE-Mirrors parallel...")
+        pool = ThreadPoolExecutor(max_workers=len(others) or 1)
+        futures = {pool.submit(self._try_mirror, m, video_id, referer): m for m in others}
+        found = None
+        try:
+            for fut in as_completed(futures):
+                result = fut.result()
+                if result:
+                    mirror = futures[fut]
+                    with _good_mirror_lock:
+                        _good_mirror = mirror
+                    logger.info(f"[+] Funktionierender Mirror gefunden: {mirror}")
+                    found = result
+                    break
+        finally:
+            # Nicht auf langsame/tote Mirrors warten
+            pool.shutdown(wait=False, cancel_futures=True)
+        if not found:
+            logger.warning("[!] Kein Mirror lieferte eine gültige Player-Seite.")
+        return found
+
     def fetch_page(self, url, referer=None):
         logger.info(f"[*] Lade Seite: {url}")
         headers = {
@@ -420,38 +494,9 @@ class VoeDownloader:
                         video_id = video_id_match.group(1)
                         logger.info(f"[+] Video-ID erfolgreich extrahiert: {video_id}")
                         
-                        # Alle Mirrors nacheinander durchprobieren
-                        for mirror in self.mirrors:
-                            mirror_url = f"https://{mirror}/e/{video_id}"
-                            logger.info(f"[*] Versuche Mirror-Abfrage: {mirror_url}")
-                            try:
-                                m_res = self.scraper.get(mirror_url, headers=headers, timeout=15)
-                                if m_res.status_code == 200:
-                                    # Prüfen, ob eine JS-Weiterleitung auf die aktive Domain vorliegt
-                                    if "window.location.href" in m_res.text:
-                                        m_js = re.search(r"window\.location\.href\s*=\s*['\"]([^'\"]+)['\"]", m_res.text)
-                                        if m_js:
-                                            active_url = m_js.group(1)
-                                            if "hugedomains" in active_url.lower() or "payment-plan" in active_url.lower() or "domain" in active_url.lower():
-                                                logger.warning(f"[!] Mirror {mirror} leitet auf eine geparkte/Domain-Kauf-Seite weiter ({active_url}). Überspringe...")
-                                                continue
-                                            logger.info(f"[+] Aktive Player-URL über JS-Redirect erkannt: {active_url}")
-                                            # Die aktive Player-Seite laden
-                                            headers["Referer"] = mirror_url
-                                            active_res = self.scraper.get(active_url, headers=headers, timeout=15)
-                                            logger.info(f"[+] Aktive Seite geladen. Status: {active_res.status_code} | Länge: {len(active_res.text)} Bytes")
-                                            if active_res.status_code == 200 and ("application/json" in active_res.text or "window.c" in active_res.text):
-                                                return active_res.text, active_res.url
-                                            else:
-                                                logger.warning(f"[!] Mirror {mirror} lieferte ungültige Seite (Status: {active_res.status_code}). Versuche nächsten Mirror...")
-                                                continue
-                                    
-                                    # Fallback falls keine JS-Weiterleitung vorliegt aber die Seite geladen wurde
-                                    if "application/json" in m_res.text or "window.c" in m_res.text:
-                                        logger.info("[+] Mirror-Seite direkt geladen.")
-                                        return m_res.text, m_res.url
-                            except Exception as mirror_err:
-                                logger.warning(f"[!] Fehler bei Mirror {mirror}: {mirror_err}")
+                        found = self.find_mirror_page(video_id, url)
+                        if found:
+                            return found
             except Exception as redirect_err:
                 logger.warning(f"[!] Fehler bei Direct-Location-Bypass: {redirect_err}. Weiche auf Standard-Abfrage aus...")
 
@@ -752,37 +797,18 @@ class VoeDownloader:
             # 4. Session synchronisieren
             logger.info("[*] Synchronisiere Session...")
             try:
-                t_res = self.scraper.get("https://voe.sx/api2/session/generate-token", headers={"Referer": url})
+                t_res = self.scraper.get("https://voe.sx/api2/session/generate-token", headers={"Referer": url}, timeout=MIRROR_TIMEOUT)
                 token = t_res.json().get("token")
                 if token:
-                    self.scraper.get(f"https://voe.sx/session/sync?token={token}&redirect={url}")
+                    self.scraper.get(f"https://voe.sx/session/sync?token={token}&redirect={url}", timeout=MIRROR_TIMEOUT)
             except: pass
 
-            # 5. Alle Mirrors nach einem funktionierenden Video-Stream absuchen
-            for domain in self.mirrors:
-                embed_url = f"https://{domain}/e/{video_id}"
-                logger.info(f"[*] Prüfe Mirror {domain}...")
-                try:
-                    res = self.scraper.get(embed_url, headers={"Referer": url}, timeout=10)
-                    if res.status_code == 200:
-                        if "window.location.href" in res.text:
-                            m = re.search(r"window\.location\.href\s*=\s*['\"]([^'\"]+)['\"]", res.text)
-                            if m:
-                                act_target = m.group(1)
-                                if not any(bad in act_target.lower() for bad in ["hugedomains", "payment-plan", "domain"]):
-                                    try:
-                                        active_res = self.scraper.get(act_target, headers={"Referer": embed_url}, timeout=10)
-                                        if active_res.status_code == 200 and ("application/json" in active_res.text or "window.c" in active_res.text):
-                                            res = active_res
-                                    except Exception:
-                                        pass
-                        
-                        link = self.decrypt_page_source(res.text) or self.extract_direct_url(res.text)
-                        if link:
-                            return link
-                except Exception as mirror_err:
-                    logger.warning(f"[!] Fehler bei Mirror {domain}: {mirror_err}")
-                    continue
+            # 5. Mirrors nach einem funktionierenden Video-Stream absuchen (parallel)
+            found = self.find_mirror_page(video_id, url)
+            if found:
+                link = self.decrypt_page_source(found[0]) or self.extract_direct_url(found[0])
+                if link:
+                    return link
 
             logger.error("[!] Konnte keinen funktionierenden Video-Stream auf den Mirrors finden.")
             return None
