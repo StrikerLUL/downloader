@@ -55,6 +55,77 @@ _good_mirror = None
 _good_mirror_lock = threading.Lock()
 MIRROR_TIMEOUT = (5, 12)  # (Verbindungsaufbau, Lesen) in Sekunden
 
+DEFAULT_BASE_URL = "http://186.2.175.5"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ACCOUNT_FILE = os.path.join(SCRIPT_DIR, "account.json")
+
+# Gemeinsamer Login-Zustand für alle Worker-Threads
+_login_lock = threading.Lock()
+_login_state = {"cookies": None, "failed_creds": set(), "needed": False}
+
+
+def _apply_shared_login(scraper):
+    """Übernimmt die Login-Cookies (falls vorhanden) in eine Session."""
+    cookies = _login_state["cookies"]
+    if cookies is None:
+        return False
+    scraper.cookies.update(cookies)
+    return True
+
+
+def load_account():
+    """Liest (email, passwort) aus account.json neben dem Skript (oder im aktuellen Ordner)."""
+    import json
+    for path in (ACCOUNT_FILE, os.path.abspath("account.json")):
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if data.get("email") and data.get("password"):
+                    return (data["email"].strip(), data["password"])
+            except Exception as e:
+                logger.error(f"[!] Fehler beim Lesen von {path}: {e}")
+    return None
+
+
+def save_account(email, password):
+    import json
+    try:
+        with open(ACCOUNT_FILE, "w", encoding="utf-8") as f:
+            json.dump({"email": email, "password": password}, f)
+        try:
+            os.chmod(ACCOUNT_FILE, 0o600)
+        except Exception:
+            pass
+        logger.info(f"[+] Zugangsdaten gespeichert in {ACCOUNT_FILE}")
+    except Exception as e:
+        logger.warning(f"[!] Konnte {ACCOUNT_FILE} nicht speichern: {e}")
+
+
+def interactive_login(base_url=None, attempts=3):
+    """Fragt (nur im Hauptthread!) nach Zugangsdaten, bis der Login klappt."""
+    if not sys.stdin.isatty():
+        return False
+    import getpass
+    d = VoeDownloader()
+    if d.load_and_login(base_url=base_url):
+        return True
+    logger.info("[*] Login wird benötigt (kostenloses Konto auf SerienStream/s.to).")
+    for i in range(attempts):
+        try:
+            email = input("E-Mail: ").strip()
+            password = getpass.getpass("Passwort: ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return False
+        if not email or not password:
+            return False
+        if d.load_and_login(email, password, base_url):
+            save_account(email, password)
+            return True
+        logger.error(f"[!] Login fehlgeschlagen ({i + 1}/{attempts}).")
+    return False
+
 def setup_logging(verbose=False, quiet=False):
     if quiet:
         level = logging.ERROR
@@ -70,12 +141,20 @@ def setup_logging(verbose=False, quiet=False):
     for handler in list(root_logger.handlers):
         root_logger.removeHandler(handler)
         
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    class _EpisodeTag(logging.Filter):
+        # Bei parallelen Downloads zeigt jede Zeile, zu welcher Episode sie gehört
+        def filter(self, record):
+            name = record.threadName
+            record.ep = "" if name == "MainThread" or name.startswith(("ThreadPool", "Thread-")) else f"[{name}] "
+            return True
+
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(ep)s%(message)s')
     
     # Console handler
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(level)
     console_handler.setFormatter(formatter)
+    console_handler.addFilter(_EpisodeTag())
     root_logger.addHandler(console_handler)
     
     # Attempt log file in /var/log/vid_download/downloads.log
@@ -103,6 +182,7 @@ def setup_logging(verbose=False, quiet=False):
         file_handler = logging.FileHandler(log_file, encoding='utf-8')
         file_handler.setLevel(level)
         file_handler.setFormatter(formatter)
+        file_handler.addFilter(_EpisodeTag())
         root_logger.addHandler(file_handler)
         
     # Silence verbose library loggers
@@ -132,72 +212,94 @@ class VoeDownloader:
             "ceremonioustakeintoaccountcustomer.com",
             "nicolehappyoutside.com",
         ]
-        self.logged_in = False
         self.preferred_lang = preferred_lang
+        # Falls bereits (von einem anderen Thread) eingeloggt wurde: Session übernehmen
+        self.logged_in = _apply_shared_login(self.scraper)
 
     def load_and_login(self, email=None, password=None, base_url=None):
+        """Loggt sich ein (einmal pro Programmlauf, Session wird mit allen Workern geteilt)."""
         if self.logged_in:
             return True
-            
-        login_base = base_url if base_url else "http://186.2.175.5"
-        
-        # Falls Zugangsdaten direkt übergeben wurden
-        if email and password:
-            self.logged_in = self.login(email, password, login_base)
-            return self.logged_in
-            
-        import json
-        account_file = "account.json"
-        
-        if os.path.exists(account_file):
-            try:
-                with open(account_file, "r") as f:
-                    data = json.load(f)
-                email_json = data.get("email")
-                password_json = data.get("password")
-                if email_json and password_json:
-                    self.logged_in = self.login(email_json, password_json, login_base)
-                    return self.logged_in
-            except Exception as e:
-                logger.error(f"[!] Fehler beim Laden von account.json: {e}")
-        return False
+        login_base = base_url if base_url else DEFAULT_BASE_URL
+
+        with _login_lock:
+            # Hat ein anderer Thread sich inzwischen eingeloggt?
+            if _apply_shared_login(self.scraper):
+                self.logged_in = True
+                return True
+
+            creds = (email, password) if (email and password) else load_account()
+            if not creds:
+                return False
+            # Dieselben Zugangsdaten nicht immer wieder probieren, wenn sie schon gescheitert sind
+            if creds in _login_state["failed_creds"]:
+                return False
+
+            if self.login(creds[0], creds[1], login_base):
+                _login_state["cookies"] = self.scraper.cookies.copy()
+                self.logged_in = True
+                return True
+            _login_state["failed_creds"].add(creds)
+            return False
 
     def login(self, email, password, base_url):
-        logger.info(f"[*] Versuche automatischen Login für {email} auf {base_url}...")
+        logger.info(f"[*] Login auf {base_url} als {email}...")
         try:
             from urllib.parse import urljoin
             login_url = urljoin(base_url, "/login")
-            
-            # 1. CSRF Token holen
-            res = self.scraper.get(login_url, timeout=15)
+            ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+            res = self.scraper.get(login_url, headers={"User-Agent": ua}, timeout=15)
             soup = BeautifulSoup(res.text, "html.parser")
-            token_input = soup.find("input", {"name": "_token"})
-            if not token_input:
-                logger.error("[!] Login-Fehler: Kein CSRF-Token auf der Seite gefunden.")
+
+            # Das Formular mit dem Passwortfeld suchen und alle (versteckten) Felder übernehmen
+            pw_input = soup.find("input", {"type": "password"})
+            form = pw_input.find_parent("form") if pw_input else None
+            if not form:
+                logger.error(f"[!] Login-Fehler: Kein Login-Formular auf {login_url} gefunden (Status {res.status_code}).")
                 return False
-                
-            csrf_token = token_input.get("value")
-            
-            # 2. Login absenden
-            payload = {
-                "_token": csrf_token,
-                "email": email,
-                "password": password
-            }
-            
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Referer": login_url
-            }
-            
-            post_res = self.scraper.post(login_url, data=payload, headers=headers, timeout=15)
-            
-            if "login" not in post_res.url.lower():
+
+            payload = {}
+            for inp in form.find_all("input"):
+                name = inp.get("name")
+                if not name:
+                    continue
+                if inp.get("type") in ("checkbox", "radio") and not inp.has_attr("checked"):
+                    continue
+                payload[name] = inp.get("value", "")
+
+            email_input = (form.find("input", {"type": "email"})
+                           or form.find("input", {"name": re.compile(r"mail|user|login", re.I)}))
+            email_field = email_input.get("name") if email_input else "email"
+            payload[email_field] = email
+            payload[pw_input.get("name") or "password"] = password
+            # "Angemeldet bleiben" aktivieren, falls vorhanden
+            remember = form.find("input", {"name": re.compile(r"remember", re.I)})
+            if remember is not None:
+                payload[remember.get("name")] = remember.get("value") or "1"
+
+            action = urljoin(res.url, form.get("action") or login_url)
+            headers = {"User-Agent": ua, "Referer": res.url, "Origin": base_url.rstrip("/")}
+            post_res = self.scraper.post(action, data=payload, headers=headers, timeout=15)
+
+            post_soup = BeautifulSoup(post_res.text, "html.parser")
+            still_login_form = post_soup.find("input", {"type": "password"}) is not None
+            if post_res.status_code < 400 and not still_login_form:
                 logger.info("[+] Login erfolgreich! Captcha-Bypass ist jetzt aktiv.")
                 return True
+
+            # Fehlermeldung der Seite anzeigen, damit man sieht, was wirklich los ist
+            if post_res.status_code == 419:
+                reason = "Sitzung/CSRF-Token abgelaufen (HTTP 419)"
+            elif post_res.status_code == 429:
+                reason = "Zu viele Login-Versuche (HTTP 429) - bitte ein paar Minuten warten"
             else:
-                logger.error("[!] Login-Fehler: Ungültige Zugangsdaten.")
-                return False
+                msgs = [e.get_text(" ", strip=True) for e in post_soup.select(
+                    ".alert, .error, .errors, .invalid-feedback, .messageAlert, .text-danger, [role=alert]")]
+                msgs = [m for m in msgs if m]
+                reason = "; ".join(dict.fromkeys(msgs))[:300] or f"Seite zeigt wieder das Login-Formular (HTTP {post_res.status_code})"
+            logger.error(f"[!] Login fehlgeschlagen: {reason}")
+            return False
         except Exception as e:
             logger.error(f"[!] Login-Fehler: {e}")
         return False
@@ -332,6 +434,12 @@ class VoeDownloader:
                 "-o", filename,      # Dateiname
                 f"--referer={referer}",
                 "--file-allocation=none",
+                "--continue=true",            # abgebrochene Downloads fortsetzen
+                "--auto-file-renaming=false", # keine "Datei.1.mp4"-Duplikate
+                "--max-tries=10",
+                "--retry-wait=3",
+                "--connect-timeout=10",
+                "--timeout=30",
                 "--console-log-level=notice",
                 "--summary-interval=5",
                 "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -738,22 +846,17 @@ class VoeDownloader:
                 parsed = urlparse(final_url)
                 base_url = f"{parsed.scheme}://{parsed.netloc}"
                 
-                # Wenn wir übergebene Zugangsdaten oder account.json haben, loggen wir uns ein
+                # Einloggen (Session wird mit allen Workern geteilt). Nachgefragt wird
+                # nur im Hauptthread, sonst würden sich parallele Episoden die Eingabe klauen.
                 if not self.logged_in:
                     self.load_and_login(email, password, base_url)
-                
-                # Wenn wir immer noch nicht eingeloggt sind und im interaktiven Modus sind, fragen wir nach den Zugangsdaten
-                if not self.logged_in and sys.stdin.isatty():
-                    logger.info("[*] Um den Schutz vollautomatisch zu umgehen, erstelle dir ein kostenloses Konto auf SerienStream/s.to.")
-                    logger.info("[*] Gib deine Anmeldedaten ein (werden lokal in account.json gespeichert):")
-                    email_input = input("E-Mail: ").strip()
-                    password_input = input("Passwort: ").strip()
-                    if email_input and password_input:
-                        import json
-                        with open("account.json", "w") as f:
-                            json.dump({"email": email_input, "password": password_input}, f)
-                        self.load_and_login(email_input, password_input, base_url)
-                
+                if not self.logged_in and threading.current_thread() is threading.main_thread():
+                    self.logged_in = interactive_login(base_url) and _apply_shared_login(self.scraper)
+                if not self.logged_in:
+                    _login_state["needed"] = True
+                    logger.error("[!] Login nötig, aber nicht möglich. Episode wird übersprungen.")
+                    return None
+
                 if self.logged_in:
                     logger.info("[*] Lade Seite nach erfolgreichem Login erneut...")
                     html, final_url = self.fetch_page(url, referer=original_url if is_series_hub else None)
@@ -819,6 +922,16 @@ class VoeDownloader:
 
     def download(self, url, dest_folder, email=None, password=None):
         logger.info("--- VOE Downloader Start ---")
+
+        # Schon fertig heruntergeladen? Dann gar nicht erst suchen/laden.
+        series_name = self.parse_series_info(url)
+        if series_name:
+            existing = os.path.join(dest_folder, f"{series_name}.mp4")
+            unfinished = any(os.path.exists(existing + ext) for ext in (".aria2", ".part", ".ytdl"))
+            if os.path.exists(existing) and not unfinished and os.path.getsize(existing) > 20 * 1024 * 1024:
+                logger.info(f"[=] Bereits vorhanden, überspringe: {existing}")
+                return True
+
         direct_link = self.get_direct_link(url, email, password)
         
         # Falls der gefundene Link die Website selbst ist, verwerfen
@@ -1060,7 +1173,15 @@ def generate_urls_from_range_args(range_str, from_str, to_str, base_url, scraper
     logger.error("[!] Kein gültiges Bereichsformat oder Template angegeben.")
     return []
 
+def episode_label(url):
+    m = re.search(r'staffel-(\d+)/episode-(\d+)', url)
+    if m:
+        return f"S{int(m.group(1)):02d}E{int(m.group(2)):02d}"
+    m = re.search(r'/filme?/film-(\d+)', url)
+    return f"Film{m.group(1)}" if m else url.rstrip('/').rsplit('/', 1)[-1][:20]
+
 def download_single_worker(url, dest_folder, email, password, lang):
+    threading.current_thread().name = episode_label(url)
     try:
         downloader = VoeDownloader(preferred_lang=lang)
         success = downloader.download(url, dest_folder, email=email, password=password)
@@ -1070,7 +1191,6 @@ def download_single_worker(url, dest_folder, email, password, lang):
         return url, False
 
 def download_batch(urls, dest_folder, email, password, lang, max_workers):
-    logger.info(f"[*] Starte Batch-Download von {len(urls)} URLs mit {max_workers} Workern...")
     seen = set()
     unique_urls = []
     for u in urls:
@@ -1089,6 +1209,8 @@ def download_batch(urls, dest_folder, email, password, lang, max_workers):
         logger.warning(f"[!] Worker-Anzahl {max_workers} ist sehr hoch. Begrenze auf 32.")
         max_workers = 32
         
+    max_workers = min(max_workers, len(unique_urls))
+    logger.info(f"[*] Starte Download von {len(unique_urls)} Episoden, {max_workers} gleichzeitig...")
     results = {}
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_url = {
@@ -1101,9 +1223,9 @@ def download_batch(urls, dest_folder, email, password, lang, max_workers):
                 url, success = future.result()
                 results[url] = success
                 if success:
-                    logger.info(f"[+] Batch-Download erfolgreich: {url}")
+                    logger.info(f"[+] Fertig: {episode_label(url)}")
                 else:
-                    logger.error(f"[!] Batch-Download fehlgeschlagen: {url}")
+                    logger.error(f"[!] Fehlgeschlagen: {episode_label(url)}")
             except Exception as e:
                 logger.error(f"[!] Thread-Ausführung fehlgeschlagen für {url}: {e}")
                 results[url] = False
@@ -1115,7 +1237,7 @@ if __name__ == "__main__":
     parser.add_argument("url", nargs="?", help="Die URL des Videos oder der Serien-Episode")
     parser.add_argument("output", nargs="?", help="Zielordner, in den das Video gespeichert werden soll")
     parser.add_argument("--urls", help="Pfad zu einer Textdatei mit einer URL pro Zeile")
-    parser.add_argument("--workers", type=int, default=4, help="Anzahl der parallelen Worker-Threads (Standard: 4)")
+    parser.add_argument("--workers", "-workers", "-w", type=int, default=6, help="Anzahl Episoden, die gleichzeitig geladen werden (Standard: 6)")
     parser.add_argument("--batch", nargs="+", help="Liste von URLs zum Herunterladen (durch Leerzeichen getrennt)")
     parser.add_argument("--range", "-range", help="Staffelbereich-Generierungs-Flag (Format: 'S01E01-S01E10' oder ein URL-Template mit '{}')")
     parser.add_argument("--from", "-from", dest="from_val", help="Startwert für den Bereich")
@@ -1190,8 +1312,6 @@ if __name__ == "__main__":
             
     if args.range:
         temp_downloader = VoeDownloader(preferred_lang=args.lang)
-        if args.email and args.password:
-            temp_downloader.load_and_login(args.email, args.password)
         base_url = args.url
         if args.output and not is_url(args.output):
             dest_folder = args.output
@@ -1229,5 +1349,36 @@ if __name__ == "__main__":
         success = downloader.download(u, o, email=args.email, password=args.password)
         sys.exit(0 if success else 1)
     else:
+        from urllib.parse import urlparse
+        site = None
+        for u in urls_to_download:
+            pu = urlparse(u)
+            if pu.scheme and pu.netloc:
+                site = f"{pu.scheme}://{pu.netloc}"
+                break
+
+        # Einmal VOR dem Start einloggen - alle Episoden teilen sich die Session
+        if (args.email and args.password) or load_account():
+            if not VoeDownloader().load_and_login(args.email, args.password, site):
+                interactive_login(site)
+
         results = download_batch(urls_to_download, dest_folder, args.email, args.password, args.lang, args.workers)
+
+        failed = [u for u, ok in results.items() if not ok]
+        # Login war nötig, aber noch nicht da: jetzt (einmal, im Hauptthread) nachfragen
+        if failed and _login_state["needed"] and _login_state["cookies"] is None:
+            if not interactive_login(site):
+                logger.error("[!] Ohne Login geht es nicht. Lege ein Konto an oder starte mit --email/--password.")
+        # Fehlgeschlagene Episoden noch einmal versuchen
+        if failed and (_login_state["cookies"] is not None or not _login_state["needed"]):
+            logger.info(f"[*] Neuer Versuch für {len(failed)} fehlgeschlagene Episode(n)...")
+            results.update(download_batch(failed, dest_folder, args.email, args.password, args.lang, args.workers))
+
+        ok_list = [episode_label(u) for u in urls_to_download if results.get(u)]
+        bad_list = [episode_label(u) for u in urls_to_download if u in results and not results[u]]
+        logger.info(f"=== Fertig: {len(ok_list)}/{len(results)} Episoden erfolgreich ===")
+        if ok_list:
+            logger.info(f"[+] Erfolgreich: {', '.join(ok_list)}")
+        if bad_list:
+            logger.error(f"[!] Fehlgeschlagen: {', '.join(bad_list)}")
         sys.exit(0 if results and all(results.values()) else 1)

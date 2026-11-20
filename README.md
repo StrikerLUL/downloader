@@ -62,6 +62,11 @@ Nach der Installation können Sie den Downloader über das erstellte Wrapper-Skr
     ./run.sh "http://186.2.175.5/serie/swat-exiles" "/media/Serien/S.W.A.T.Exiles" --range S01E01-S01E07
     ```
     (`-range` mit nur einem Bindestrich funktioniert ebenfalls.)
+    *   Standardmäßig laden **6 Episoden gleichzeitig**, ändern mit `--workers 8` (oder `-w 8`).
+    *   Bereits vollständig heruntergeladene Episoden werden übersprungen, ein erneuter Start lädt also nur, was fehlt.
+    *   Am Ende zeigt eine Zusammenfassung, welche Episoden geklappt haben. Fehlgeschlagene werden automatisch ein zweites Mal versucht.
+
+*   **Login (gegen Captchas):** Beim ersten Mal wird **einmal** nach E-Mail und Passwort gefragt. Nach erfolgreichem Login werden sie in `account.json` neben dem Skript gespeichert und danach automatisch benutzt. Alternativ: `--email DEINE@MAIL --password PASSWORT`.
 
 *   **Direkter VOE-Player Link:**
     ```bash
